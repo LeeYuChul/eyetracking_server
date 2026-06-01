@@ -1,0 +1,23 @@
+services:
+  eyetrack-analysis-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      cache_from:
+        - eyetrack-analysis-server:latest
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: eyetrack-analysis-server:latest
+    container_name: eyetrack-analysis-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "3781:3781"
+    gpus: all
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3781/api/v1/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

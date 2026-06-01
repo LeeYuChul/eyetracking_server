@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.git/
+.gitignore
+storage/
+*.zip
+*.log
+tests/
+README.md
