@@ -1,4 +1,6 @@
 import logging
+import gc
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -167,6 +169,30 @@ class SaliencyModel:
     def _predict_tensorflow(self, image: Image.Image) -> np.ndarray | None:
         if self._keras_model is None:
             return None
+        try:
+            size = self._keras_model.input_shape[1:3]
+            if not size or None in size:
+                size = image.size[::-1]
+            resized = image.resize((int(size[1]), int(size[0])), Image.Resampling.LANCZOS)
+            arr = np.asarray(resized.convert("RGB"), dtype=np.float32) / 255.0
+            output = self._keras_model.predict(arr[None, ...], verbose=0)
+            saliency = np.squeeze(output).astype(np.float32)
+            if saliency.ndim == 3:
+                saliency = saliency[..., 0]
+            saliency -= saliency.min()
+            peak = float(saliency.max())
+            if peak > 0:
+                saliency /= peak
+            return (
+                np.asarray(
+                    Image.fromarray((saliency * 255).astype(np.uint8)).resize(image.size, Image.Resampling.BILINEAR),
+                    dtype=np.float32,
+                )
+                / 255.0
+            )
+        except Exception as exc:
+            logger.exception("TensorFlow prediction failed, falling back to heuristic: %s", exc)
+            return None
 
     def _predict_torch_heuristic(self, image: Image.Image) -> np.ndarray:
         if self._torch is None:
@@ -188,6 +214,31 @@ class SaliencyModel:
             saliency = saliency / peak
         return saliency.detach().cpu().numpy()
 
+    def unload(self) -> None:
+        used_tensorflow = self._umsi_runner is not None or self._keras_model is not None
+        if self._umsi_runner is not None:
+            self._umsi_runner.unload()
+            self._umsi_runner = None
+        self._keras_model = None
+        if used_tensorflow:
+            try:
+                from tensorflow.keras import backend as keras_backend
+
+                keras_backend.clear_session()
+            except Exception:
+                logger.debug("TensorFlow/Keras cleanup skipped", exc_info=True)
+        if self._torch is not None and self._torch.cuda.is_available():
+            try:
+                self._torch.cuda.empty_cache()
+                self._torch.cuda.ipc_collect()
+            except Exception:
+                logger.debug("PyTorch CUDA cleanup skipped", exc_info=True)
+        self._torch = None
+        self.loaded = False
+        self.device = "cpu"
+        self.cuda_usable = False
+        gc.collect()
+
     @staticmethod
     def normalize_name(name: str) -> str:
         return name.strip().lower()
@@ -203,9 +254,14 @@ class ModelRegistry:
         cuda_device_index: int,
         allowed_model_names: list[str],
         default_model_name: str,
+        idle_unload_seconds: float = 60.0,
     ) -> None:
         self.default_model_name = self.normalize_name(default_model_name)
         self.allowed_model_names = {self.normalize_name(name) for name in allowed_model_names}
+        self._usage_lock = threading.Lock()
+        self._active_requests = 0
+        self._idle_unload_seconds = max(0.0, idle_unload_seconds)
+        self._unload_timer: threading.Timer | None = None
         self._models = {
             "umsi++": SaliencyModel(
                 name="UMSI++",
@@ -232,6 +288,54 @@ class ModelRegistry:
             if name in self.allowed_model_names:
                 model.load()
 
+    def begin_request_model(self, name: str | None) -> SaliencyModel | None:
+        with self._usage_lock:
+            self._cancel_idle_unload_locked()
+            model = self.get(name)
+            if model is None:
+                return None
+            if not model.loaded:
+                model.load()
+            self._active_requests += 1
+            return model
+
+    def end_request(self) -> None:
+        with self._usage_lock:
+            self._active_requests = max(0, self._active_requests - 1)
+            if self._active_requests == 0:
+                self._schedule_idle_unload_locked()
+
+    def unload_all(self) -> None:
+        self._cancel_idle_unload()
+        for model in self._models.values():
+            if model.loaded:
+                model.unload()
+
+    def _schedule_idle_unload_locked(self) -> None:
+        self._cancel_idle_unload_locked()
+        delay = self._idle_unload_seconds if self._idle_unload_seconds > 0 else 0.0
+        self._unload_timer = threading.Timer(delay, self._unload_if_idle)
+        self._unload_timer.daemon = True
+        self._unload_timer.start()
+
+    def _cancel_idle_unload(self) -> None:
+        with self._usage_lock:
+            self._cancel_idle_unload_locked()
+
+    def _cancel_idle_unload_locked(self) -> None:
+        if self._unload_timer is not None:
+            self._unload_timer.cancel()
+            self._unload_timer = None
+
+    def _unload_if_idle(self) -> None:
+        with self._usage_lock:
+            self._unload_timer = None
+            if self._active_requests != 0:
+                return
+            models = [model for model in self._models.values() if model.loaded]
+            for model in models:
+                model.unload()
+
     def get(self, name: str | None) -> SaliencyModel | None:
         normalized = self.normalize_name(name or self.default_model_name)
         if normalized not in self.allowed_model_names:
@@ -256,21 +360,3 @@ class ModelRegistry:
             for name, model in self._models.items()
             if name in self.allowed_model_names
         }
-        try:
-            size = self._keras_model.input_shape[1:3]
-            if not size or None in size:
-                size = image.size[::-1]
-            resized = image.resize((int(size[1]), int(size[0])), Image.Resampling.LANCZOS)
-            arr = np.asarray(resized.convert("RGB"), dtype=np.float32) / 255.0
-            output = self._keras_model.predict(arr[None, ...], verbose=0)
-            saliency = np.squeeze(output).astype(np.float32)
-            if saliency.ndim == 3:
-                saliency = saliency[..., 0]
-            saliency -= saliency.min()
-            peak = float(saliency.max())
-            if peak > 0:
-                saliency /= peak
-            return np.asarray(Image.fromarray((saliency * 255).astype(np.uint8)).resize(image.size, Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
-        except Exception as exc:
-            logger.exception("TensorFlow prediction failed, falling back to heuristic: %s", exc)
-            return None

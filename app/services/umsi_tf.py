@@ -102,6 +102,16 @@ class UMSITensorFlowRunner:
         pred_map = np.squeeze(pred_map[0]).astype(np.float32)
         return postprocess_prediction(pred_map, image.height, image.width)
 
+    def unload(self) -> None:
+        self.model = None
+        self.device = "cpu"
+        try:
+            import tensorflow as tf
+
+            tf.keras.backend.clear_session()
+        except Exception:
+            logger.debug("TensorFlow session cleanup skipped", exc_info=True)
+
 
 def build_umsi_model():
     import tensorflow as tf

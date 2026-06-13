@@ -1,6 +1,6 @@
-# Eye-Tracking Heatmap Analysis Server
+# AI UX Flow Validation Server
 
-FastAPI MVP server for Figma eye-tracking heatmap analysis.
+Stateless FastAPI server for Figma AI UX Flow validation. It analyzes selected mobile UI frames, returns base64 artifacts in the response body, and does not persist analysis sessions, images, reports, target results, or chat history.
 
 ## Setup
 
@@ -96,6 +96,7 @@ Runtime settings are read from `.env` using the `EYETRACK_` prefix.
 ```bash
 EYETRACK_PORT=3781
 EYETRACK_BASE_URL=https://eyetrack.newlearn.ai.kr
+EYETRACK_STORAGE_POLICY=stateless_response_only
 EYETRACK_MODEL_WEIGHTS_DIR=model/model_weights
 EYETRACK_SALIENCY_MODEL_PATH=model/model_weights/saliency_models/UMSI++/umsi++.hdf5
 EYETRACK_DEFAULT_MODEL_NAME=umsi++
@@ -103,11 +104,38 @@ EYETRACK_ALLOWED_MODEL_NAMES='["umsi++","heuristic"]'
 EYETRACK_MODEL_RUNTIME=auto
 EYETRACK_DEVICE=cuda
 EYETRACK_CUDA_DEVICE_INDEX=0
+EYETRACK_MAX_FRAMES=15
+EYETRACK_MAX_UPLOAD_BYTES=10485760
+EYETRACK_MAX_TOTAL_UPLOAD_BYTES=104857600
+EYETRACK_MODEL_IDLE_UNLOAD_SECONDS=60
+EYETRACK_VLM_PROVIDER=ollama
+EYETRACK_OLLAMA_BASE_URL=http://host.docker.internal:11434
+EYETRACK_OLLAMA_MODEL=gemma4:26b
+EYETRACK_OLLAMA_KEEP_ALIVE=1m
+EYETRACK_OPENAI_API_KEY=
+EYETRACK_OPENAI_MODEL=gpt-4.1-mini
+EYETRACK_OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
 ## API Shape
 
-`POST /api/v1/analyses` processes the uploaded image in memory and returns the report immediately. The server does not persist uploaded images, heatmaps, overlays, or reports. No per-job retrieval APIs are exposed.
+The server is request-in/response-out. Clients must store returned bundles locally if they want to reuse them.
+
+- `GET /api/v1/health` returns server, storage policy, heatmap, scanpath, and VLM provider status.
+- `POST /api/v1/flow/parse` validates frame names and returns a Flow Tree without image upload.
+- `POST /api/v1/flow/analyze` accepts up to 15 frame images plus `frames_meta`, then returns `analysis_bundle`.
+- `POST /api/v1/flow/prepare-target` accepts a client-owned bundle subset and returns target-specific Memory Blur artifacts.
+- `POST /api/v1/ux/evaluate` accepts a question plus client-owned evidence and returns a VLM UX evaluation answer.
+- `POST /api/v1/ux/chat` is the chatbot-facing VLM endpoint for ongoing UX Q&A.
+- `POST /api/v1/ux/chat/heuristic` returns deterministic UX guidance from metrics when VLM is unavailable or not desired.
+- `POST /api/v1/analyses` remains available as a legacy single-frame compatibility endpoint.
+
+`POST /api/v1/flow/analyze` expects multipart fields:
+
+- `files`: repeated PNG/JPEG frame files
+- `frames_meta`: JSON array with `client_frame_id`, `figma_node_id`, `frame_name`, `width`, `height`, `file_key`, `order_index`
+- `model_name`: optional `umsi++` or `heuristic`
+- `options`: optional JSON object
 
 Clients can select the analysis model with multipart field `model_name`.
 
@@ -116,7 +144,15 @@ Supported values:
 - `umsi++`
 - `heuristic`
 
-The response includes:
+The Flow response includes:
+
+- `flow_tree`
+- per-frame `metrics` with scanpath length, fixation count, entropy, complexity, and fixation points
+- per-frame `artifacts.original`, `heatmap`, `heatmap_overlay`, `scanpath_overlay`
+- `warnings`
+- `model_info`
+
+The legacy single-frame response still includes:
 
 - `report`
 - `assets.heatmap_png_base64`

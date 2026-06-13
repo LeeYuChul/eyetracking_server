@@ -14,6 +14,8 @@ services:
       - .env
     ports:
       - "3781:3781"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     gpus: all
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3781/api/v1/health', timeout=5)\""]

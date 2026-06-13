@@ -4,6 +4,7 @@ pillow
 numpy
 python-multipart
 pydantic-settings
+httpx
 h5py
 torch==2.7.1
 tensorflow==2.18.0
