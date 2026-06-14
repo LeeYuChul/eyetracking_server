@@ -9,29 +9,18 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 
 from app.core.config import Settings, get_settings
-from app.models.flow import (
-    AnalysisBundle,
-    ClientFrameInput,
-    FlowParseRequest,
-    FlowParseResponse,
-    ModelInfo,
-    PrepareTargetRequest,
-    TargetResult,
-    UxEvaluateRequest,
-)
+from app.models.frame import FrameAnalysisBundle, FrameChatRequest, FrameInput, FrameModelInfo
 from app.models.job import ErrorCode
 from app.services.model import ModelRegistry, SaliencyModel
-from app.services.artifacts import image_from_artifact, image_to_artifact
-from app.services.flow import build_flow_parse_response, resolve_target_path
+from app.services.artifacts import image_to_artifact
 from app.services.image_processing import make_overlay, normalize_upload, saliency_to_heatmap
-from app.services.memory import build_target_frame_result
 from app.services.pipeline import analyze_image
 from app.services.scanpath import build_scanpath_metrics, make_scanpath_overlay
-from app.services.vlm import evaluate_ux, evaluate_with_heuristic
+from app.services.vlm import evaluate_frame_chat, stream_frame_chat_events
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -105,11 +94,11 @@ def safe_json_object(value: str | None) -> dict[str, Any]:
     return parsed
 
 
-def parse_frames_meta(value: str) -> list[ClientFrameInput]:
+def parse_frames_meta(value: str) -> list[FrameInput]:
     parsed = json.loads(value)
     if not isinstance(parsed, list):
         raise ValueError("frames_meta must be a JSON array")
-    return [ClientFrameInput(**item) for item in parsed]
+    return [FrameInput(**item) for item in parsed]
 
 
 async def read_valid_image(upload: UploadFile, settings: Settings) -> tuple[bytes, Image.Image]:
@@ -135,9 +124,12 @@ def upload_key(upload: UploadFile) -> str:
     return stem or filename
 
 
-def has_selected_images(request: UxEvaluateRequest) -> bool:
-    images = request.evidence.get("selected_images")
-    return isinstance(images, list) and any(isinstance(item, dict) and item.get("base64") for item in images)
+def has_selected_images(request: FrameChatRequest) -> bool:
+    return any(image.base64 for image in request.selected_images)
+
+
+def sse_message(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @app.get("/api/v1/health")
@@ -168,16 +160,8 @@ def health(settings: Settings = Depends(get_settings), registry: ModelRegistry =
     }
 
 
-@app.post("/api/v1/flow/parse", response_model=FlowParseResponse)
-def parse_flow(request: FlowParseRequest):
-    started_at = perf_counter()
-    response = build_flow_parse_response(request.frames)
-    log_request("/api/v1/flow/parse", started_at, frame_count=len(request.frames))
-    return response
-
-
-@app.post("/api/v1/flow/analyze", response_model=AnalysisBundle)
-async def analyze_flow(
+@app.post("/api/v1/frames/analyze", response_model=FrameAnalysisBundle)
+async def analyze_frames(
     files: list[UploadFile] = File(...),
     frames_meta: str = Form(...),
     options: str | None = Form(None),
@@ -190,12 +174,12 @@ async def analyze_flow(
         frame_inputs = parse_frames_meta(frames_meta)
         parsed_options = safe_json_object(options)
     except Exception as exc:
-        log_request("/api/v1/flow/analyze", started_at, error_code=ErrorCode.invalid_frame_metadata)
+        log_request("/api/v1/frames/analyze", started_at, error_code=ErrorCode.invalid_frame_metadata)
         return error_response(400, ErrorCode.invalid_frame_metadata, str(exc))
 
     frame_count = len(frame_inputs)
     if frame_count < 1 or frame_count > settings.max_frames:
-        log_request("/api/v1/flow/analyze", started_at, frame_count=frame_count, error_code=ErrorCode.invalid_frame_count)
+        log_request("/api/v1/frames/analyze", started_at, frame_count=frame_count, error_code=ErrorCode.invalid_frame_count)
         return error_response(400, ErrorCode.invalid_frame_count, f"Frame count must be between 1 and {settings.max_frames}")
 
     saliency_model = registry.begin_request_model(model_name)
@@ -208,7 +192,7 @@ async def analyze_flow(
     uploads_by_key = {upload_key(upload): upload for upload in files}
     uploads_by_filename = {upload.filename or "": upload for upload in files}
     total_bytes = 0
-    parse_response = build_flow_parse_response(frame_inputs)
+    prepared_frames = []
     results = []
 
     try:
@@ -236,31 +220,48 @@ async def analyze_flow(
 
             try:
                 original = normalize_upload(image, width, height)
-                saliency = saliency_model.predict(original)
-                heatmap = saliency_to_heatmap(saliency)
-                heatmap_overlay = make_overlay(original, heatmap, float(parsed_options.get("heatmap_alpha", settings.overlay_alpha)))
             except Exception as exc:
                 logger.exception("heatmap inference failed")
-                log_request("/api/v1/flow/analyze", started_at, frame_count=frame_count, error_code=ErrorCode.heatmap_inference_failed)
+                log_request("/api/v1/frames/analyze", started_at, frame_count=frame_count, error_code=ErrorCode.heatmap_inference_failed)
                 return error_response(500, ErrorCode.heatmap_inference_failed, str(exc))
+
+            prepared_frames.append(
+                {
+                    "frame": frame,
+                    "width": width,
+                    "height": height,
+                    "original": original,
+                }
+            )
+
+        try:
+            saliencies = saliency_model.predict_many([item["original"] for item in prepared_frames])
+        except Exception as exc:
+            logger.exception("heatmap inference failed")
+            log_request("/api/v1/frames/analyze", started_at, frame_count=frame_count, error_code=ErrorCode.heatmap_inference_failed)
+            return error_response(500, ErrorCode.heatmap_inference_failed, str(exc))
+
+        for item, saliency in zip(prepared_frames, saliencies, strict=True):
+            frame = item["frame"]
+            original = item["original"]
+            heatmap = saliency_to_heatmap(saliency)
+            heatmap_overlay = make_overlay(original, heatmap, float(parsed_options.get("heatmap_alpha", settings.overlay_alpha)))
 
             try:
                 metrics = build_scanpath_metrics(saliency)
                 scanpath_overlay = make_scanpath_overlay(original, metrics)
             except Exception as exc:
                 logger.exception("scanpath inference failed")
-                log_request("/api/v1/flow/analyze", started_at, frame_count=frame_count, error_code=ErrorCode.scanpath_inference_failed)
+                log_request("/api/v1/frames/analyze", started_at, frame_count=frame_count, error_code=ErrorCode.scanpath_inference_failed)
                 return error_response(500, ErrorCode.scanpath_inference_failed, str(exc))
 
-            parsed = next(item for item in parse_response.parsed_frames if item.client_frame_id == frame.client_frame_id)
             results.append(
                 {
                     "client_frame_id": frame.client_frame_id,
                     "figma_node_id": frame.figma_node_id,
                     "frame_name": frame.frame_name,
-                    "parsed": parsed,
-                    "width": width,
-                    "height": height,
+                    "width": item["width"],
+                    "height": item["height"],
                     "order_index": frame.order_index,
                     "metrics": metrics,
                     "artifacts": {
@@ -272,113 +273,72 @@ async def analyze_flow(
                 }
             )
 
-        bundle = AnalysisBundle(
-            analysis_bundle_id=make_bundle_id("uxflow"),
+        bundle = FrameAnalysisBundle(
+            analysis_bundle_id=make_bundle_id("frames"),
             created_at=now_iso(),
-            flow_tree=parse_response.flow_tree,
             frames=results,
-            warnings=parse_response.warnings,
-            model_info=ModelInfo(
+            model_info=FrameModelInfo(
                 heatmap_model=saliency_model.name,
                 heatmap_version=saliency_model.version,
                 heatmap_backend=saliency_model.backend,
             ),
         )
-        log_request("/api/v1/flow/analyze", started_at, frame_count=frame_count)
+        log_request("/api/v1/frames/analyze", started_at, frame_count=frame_count)
         return bundle
     finally:
         registry.end_request()
 
 
-@app.post("/api/v1/flow/prepare-target", response_model=TargetResult)
-def prepare_target(request: PrepareTargetRequest):
+@app.post("/api/v1/frames/chat/stream")
+async def frame_chat_stream(
+    request: FrameChatRequest,
+    settings: Settings = Depends(get_settings),
+):
     started_at = perf_counter()
-    path_frame_ids = resolve_target_path(request.flow_tree, request.target_frame_id)
-    if not path_frame_ids:
-        log_request("/api/v1/flow/prepare-target", started_at, frame_count=len(request.frames), error_code=ErrorCode.target_path_not_found)
-        return error_response(400, ErrorCode.target_path_not_found, "Target frame is not present in the flow tree")
 
-    frames_by_id = {frame.client_frame_id: frame for frame in request.frames}
-    results = []
-    previous_ids = path_frame_ids[:-1]
-    for index, frame_id in enumerate(previous_ids):
-        frame = frames_by_id.get(frame_id)
-        if frame is None or frame.original_image is None:
-            return error_response(400, ErrorCode.invalid_frame_metadata, f"Missing original image for frame: {frame_id}")
-        original = image_from_artifact(frame.original_image).convert("RGB")
-        heatmap = image_from_artifact(frame.heatmap) if frame.heatmap is not None else None
-        metrics = frame.scanpath_metrics or frame.metrics
-        scanpath_length = float(metrics.get("scanpath_length", 0.0)) if isinstance(metrics, dict) else 0.0
-        temporal_distance = len(path_frame_ids) - index - 1
-        results.append(
-            build_target_frame_result(
-                client_frame_id=frame_id,
-                original=original,
-                heatmap=heatmap,
-                temporal_distance=temporal_distance,
-                scanpath_length=scanpath_length,
-                options=request.options,
-            )
-        )
+    async def event_stream():
+        if not request.question.strip():
+            yield sse_message("error", {"error_code": ErrorCode.invalid_frame_metadata, "message": "question is required"})
+            log_request("/api/v1/frames/chat/stream", started_at, error_code=ErrorCode.invalid_frame_metadata)
+            return
+        if not has_selected_images(request):
+            yield sse_message("error", {"error_code": ErrorCode.invalid_frame_metadata, "message": "selected_images are required for frame chat"})
+            log_request("/api/v1/frames/chat/stream", started_at, error_code=ErrorCode.invalid_frame_metadata)
+            return
+        if settings.vlm_provider.strip().lower() != "ollama":
+            try:
+                yield sse_message("progress", {"stage": "evaluating", "message": "프레임 이미지를 VLM으로 평가 중입니다.", "progress": 0.1})
+                response = await evaluate_frame_chat(request, settings)
+                yield sse_message(
+                    "final",
+                    {
+                        "answer": response.answer.model_dump(),
+                        "provider": response.provider,
+                        "model": response.model,
+                        "progress": 1,
+                    },
+                )
+                log_request("/api/v1/frames/chat/stream", started_at)
+            except Exception as exc:
+                logger.warning("frame chat stream vlm evaluation failed: %s", exc)
+                yield sse_message("error", {"error_code": ErrorCode.vlm_evaluation_failed, "message": "Frame chat evaluation failed"})
+                log_request("/api/v1/frames/chat/stream", started_at, error_code=ErrorCode.vlm_evaluation_failed)
+            return
 
-    target_result = TargetResult(
-        target_result_id=make_bundle_id("target"),
-        target_frame_id=request.target_frame_id,
-        path_frame_ids=path_frame_ids,
-        frames=results,
-        memory_model_options=request.options,
-        created_at=now_iso(),
+        try:
+            async for item in stream_frame_chat_events(request, settings):
+                yield sse_message(item["event"], item["data"])
+            log_request("/api/v1/frames/chat/stream", started_at)
+        except Exception as exc:
+            logger.warning("frame chat stream vlm evaluation failed: %s", exc)
+            yield sse_message("error", {"error_code": ErrorCode.vlm_evaluation_failed, "message": "Frame chat evaluation failed"})
+            log_request("/api/v1/frames/chat/stream", started_at, error_code=ErrorCode.vlm_evaluation_failed)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-    log_request("/api/v1/flow/prepare-target", started_at, frame_count=len(request.frames))
-    return target_result
-
-
-@app.post("/api/v1/ux/evaluate")
-async def ux_evaluate(
-    request: UxEvaluateRequest,
-    settings: Settings = Depends(get_settings),
-):
-    started_at = perf_counter()
-    if not request.question.strip():
-        return error_response(400, ErrorCode.invalid_frame_metadata, "question is required")
-    try:
-        response = await evaluate_ux(request, settings)
-    except Exception as exc:
-        logger.warning("vlm evaluation failed: %s", exc)
-        log_request("/api/v1/ux/evaluate", started_at, error_code=ErrorCode.vlm_evaluation_failed)
-        return error_response(500, ErrorCode.vlm_evaluation_failed, "VLM evaluation failed")
-    log_request("/api/v1/ux/evaluate", started_at)
-    return response
-
-
-@app.post("/api/v1/ux/chat")
-async def ux_chat(
-    request: UxEvaluateRequest,
-    settings: Settings = Depends(get_settings),
-):
-    started_at = perf_counter()
-    if not request.question.strip():
-        return error_response(400, ErrorCode.invalid_frame_metadata, "question is required")
-    if not has_selected_images(request):
-        return error_response(400, ErrorCode.invalid_frame_metadata, "selected_images are required for VLM chat")
-    try:
-        response = await evaluate_ux(request, settings)
-    except Exception as exc:
-        logger.warning("ux chat vlm evaluation failed: %s", exc)
-        log_request("/api/v1/ux/chat", started_at, error_code=ErrorCode.vlm_evaluation_failed)
-        return error_response(500, ErrorCode.vlm_evaluation_failed, "VLM chat evaluation failed")
-    log_request("/api/v1/ux/chat", started_at)
-    return response
-
-
-@app.post("/api/v1/ux/chat/heuristic")
-def ux_heuristic_chat(request: UxEvaluateRequest):
-    started_at = perf_counter()
-    if not request.question.strip():
-        return error_response(400, ErrorCode.invalid_frame_metadata, "question is required")
-    response = evaluate_with_heuristic(request)
-    log_request("/api/v1/ux/chat/heuristic", started_at)
-    return response
 
 
 @app.post("/api/v1/analyses")

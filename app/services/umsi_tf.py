@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import gc
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +75,11 @@ class UMSITensorFlowRunner:
         self.device = "cpu"
 
     def load(self) -> None:
+        self.backend = "tensorflow-umsi++-subprocess"
+        self.device = f"cuda:{self.cuda_device_index}"
+        logger.info("Prepared original UMSI++ TensorFlow subprocess runner on %s", self.device)
+
+    def load_in_process(self) -> None:
         cuda_data_dir = find_cuda_data_dir()
         if cuda_data_dir is not None:
             os.environ.setdefault("XLA_FLAGS", f"--xla_gpu_cuda_data_dir={cuda_data_dir}")
@@ -89,6 +98,39 @@ class UMSITensorFlowRunner:
         logger.info("Loaded original UMSI++ TensorFlow model on %s", self.device)
 
     def predict(self, image: Image.Image) -> np.ndarray:
+        return self.predict_many([image])[0]
+
+    def predict_many(self, images: list[Image.Image]) -> list[np.ndarray]:
+        if not images:
+            return []
+        with tempfile.TemporaryDirectory(prefix="eyetrack_umsi_") as temp_dir:
+            temp_path = Path(temp_dir)
+            input_dir = temp_path / "input"
+            input_dir.mkdir()
+            output_path = temp_path / "predictions.npz"
+            for index, image in enumerate(images):
+                image.convert("RGB").save(input_dir / f"{index:04d}.png", format="PNG")
+
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(self.cuda_device_index)
+            command = [
+                sys.executable,
+                "-m",
+                "app.services.umsi_tf_worker",
+                str(self.weights_path),
+                str(input_dir),
+                str(output_path),
+            ]
+            completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=600, check=False)
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "UMSI++ TensorFlow worker failed "
+                    f"code={completed.returncode} stdout={completed.stdout[-1000:]} stderr={completed.stderr[-1000:]}"
+                )
+            with np.load(output_path) as data:
+                return [data[f"prediction_{index}"].astype(np.float32) for index in range(len(images))]
+
+    def predict_in_process(self, image: Image.Image) -> np.ndarray:
         if self.model is None:
             raise RuntimeError("UMSI++ TensorFlow model is not loaded")
 
@@ -103,14 +145,26 @@ class UMSITensorFlowRunner:
         return postprocess_prediction(pred_map, image.height, image.width)
 
     def unload(self) -> None:
+        if self.model is None:
+            self.device = "cpu"
+            logger.info("Released original UMSI++ TensorFlow subprocess runner")
+            return
+        model = self.model
         self.model = None
+        del model
         self.device = "cpu"
         try:
             import tensorflow as tf
 
             tf.keras.backend.clear_session()
+            try:
+                tf.compat.v1.reset_default_graph()
+            except Exception:
+                logger.debug("TensorFlow default graph reset skipped", exc_info=True)
         except Exception:
             logger.debug("TensorFlow session cleanup skipped", exc_info=True)
+        gc.collect()
+        logger.info("Unloaded original UMSI++ TensorFlow model")
 
 
 def build_umsi_model():

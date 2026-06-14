@@ -23,12 +23,18 @@ class Settings(BaseSettings):
     max_frames: int = 15
     max_upload_bytes: int = 10 * 1024 * 1024
     max_total_upload_bytes: int = 100 * 1024 * 1024
-    model_idle_unload_seconds: float = 60.0
+    model_idle_unload_seconds: float = 0.0
     overlay_alpha: float = Field(default=0.45, ge=0.0, le=1.0)
     vlm_provider: str = "ollama"
     ollama_base_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "gemma4:26b"
     ollama_keep_alive: str = "1m"
+    ollama_num_ctx: int = 32768
+    ollama_num_predict: int = 768
+    vlm_request_timeout_seconds: float = 600.0
+    vlm_image_chunk_size: int = 5
+    vlm_max_image_side: int = 768
+    vlm_image_jpeg_quality: int = 82
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
     openai_base_url: str = "https://api.openai.com/v1"

@@ -148,6 +148,8 @@ class MemoryMetrics(BaseModel):
     estimated_retention: float
     blur_strength_avg: float
     temporal_distance: int
+    depth_blur_strength: float | None = None
+    cumulative_blur_strength: float | None = None
 
 
 class TargetFrameResult(BaseModel):

@@ -42,7 +42,12 @@ class SaliencyModel:
 
     def load(self) -> None:
         try:
-            self._configure_device()
+            if self.weights_path is None or self.runtime == "metadata_only":
+                self._configure_cpu_only()
+            elif self.normalize_name(self.name) == "umsi++":
+                self._configure_subprocess_device()
+            else:
+                self._configure_device()
             if self.weights_path is not None:
                 if not self.weights_path.exists():
                     raise FileNotFoundError(f"Model weights not found: {self.weights_path}")
@@ -59,6 +64,26 @@ class SaliencyModel:
             self.loaded = False
             self.load_error = str(exc)
             logger.exception("Model failed to load")
+
+    def _configure_cpu_only(self) -> None:
+        self._torch = None
+        self.device = "cpu"
+        self.cuda_available = False
+        self.cuda_usable = False
+        self.cuda_device_name = None
+
+    def _configure_subprocess_device(self) -> None:
+        self._torch = None
+        if self.device_preference == "cuda":
+            self.device = f"cuda:{self.cuda_device_index}"
+            self.cuda_available = True
+            self.cuda_usable = True
+            self.cuda_device_name = None
+            return
+        self.device = "cpu"
+        self.cuda_available = False
+        self.cuda_usable = False
+        self.cuda_device_name = None
 
     def _configure_device(self) -> None:
         try:
@@ -166,6 +191,13 @@ class SaliencyModel:
             saliency /= peak
         return saliency
 
+    def predict_many(self, images: list[Image.Image]) -> list[np.ndarray]:
+        if not self.loaded:
+            raise RuntimeError("Model is not loaded")
+        if self._umsi_runner is not None:
+            return self._umsi_runner.predict_many(images)
+        return [self.predict(image) for image in images]
+
     def _predict_tensorflow(self, image: Image.Image) -> np.ndarray | None:
         if self._keras_model is None:
             return None
@@ -215,7 +247,7 @@ class SaliencyModel:
         return saliency.detach().cpu().numpy()
 
     def unload(self) -> None:
-        used_tensorflow = self._umsi_runner is not None or self._keras_model is not None
+        used_tensorflow = self._keras_model is not None or bool(self._umsi_runner is not None and self._umsi_runner.model is not None)
         if self._umsi_runner is not None:
             self._umsi_runner.unload()
             self._umsi_runner = None
@@ -300,10 +332,17 @@ class ModelRegistry:
             return model
 
     def end_request(self) -> None:
+        models_to_unload: list[SaliencyModel] = []
         with self._usage_lock:
             self._active_requests = max(0, self._active_requests - 1)
             if self._active_requests == 0:
-                self._schedule_idle_unload_locked()
+                if self._idle_unload_seconds <= 0:
+                    self._cancel_idle_unload_locked()
+                    models_to_unload = [model for model in self._models.values() if model.loaded]
+                else:
+                    self._schedule_idle_unload_locked()
+        for model in models_to_unload:
+            model.unload()
 
     def unload_all(self) -> None:
         self._cancel_idle_unload()
@@ -313,8 +352,9 @@ class ModelRegistry:
 
     def _schedule_idle_unload_locked(self) -> None:
         self._cancel_idle_unload_locked()
-        delay = self._idle_unload_seconds if self._idle_unload_seconds > 0 else 0.0
-        self._unload_timer = threading.Timer(delay, self._unload_if_idle)
+        if self._idle_unload_seconds <= 0:
+            return
+        self._unload_timer = threading.Timer(self._idle_unload_seconds, self._unload_if_idle)
         self._unload_timer.daemon = True
         self._unload_timer.start()
 

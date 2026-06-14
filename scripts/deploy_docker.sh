@@ -17,7 +17,6 @@ fi
 echo "Building image: ${IMAGE_NAME}"
 docker build \
   --build-arg BUILDKIT_INLINE_CACHE=1 \
-  --cache-from "${IMAGE_NAME}" \
   -t "${IMAGE_NAME}" \
   .
 
@@ -33,6 +32,7 @@ docker run -d \
   --name "${CONTAINER_NAME}" \
   --restart unless-stopped \
   --env-file .env \
+  --add-host=host.docker.internal:host-gateway \
   -p "${HOST_PORT}:${CONTAINER_PORT}" \
   "${GPU_ARGS[@]}" \
   "${IMAGE_NAME}"
