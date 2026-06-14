@@ -199,17 +199,21 @@ def build_prompt(request: FrameChatRequest, *, streaming: bool) -> str:
     )
     if streaming:
         return common + (
-            "반드시 한국어로만 답하세요. 실제 사용자 테스트(UT)에 참여한 대상자처럼, 먼저 짧은 사용자 페르소나를 가정한 뒤 "
-            "1인칭 관찰과 행동 가능성을 섞어 답하세요. 예: '저는 ... 사용자라고 가정하면 ...'. "
-            "첨부된 원본 화면, Heatmap overlay, Scanpath overlay 이미지를 가장 중요한 근거로 사용하세요. "
-            "Heatmap은 시선이 어디에 끌릴 가능성이 높은지, Scanpath는 시선 이동과 탐색 흐름이 어떤지 설명하세요. "
+            "반드시 한국어로만 답하세요. 가장 중요한 규칙은 Question에 직접 답하는 것입니다. "
+            "내부 UX 분석 지침, 페르소나, Heatmap, Scanpath 설명은 Question에 답하는 데 필요한 경우에만 보조 근거로 사용하세요. "
+            "Question이 화면 문구의 의미, 특정 용어, 버튼, 위치, 상태에 대한 질문이면 먼저 그 질문의 답을 1-2문장으로 명확히 말하세요. "
+            "예를 들어 '스타터는 어떤 의미일까?'처럼 용어 의미를 묻는다면, UX 개선안보다 해당 단어가 이 화면에서 어떤 상태/역할을 뜻하는지 먼저 설명하세요. "
+            "Question이 명시적으로 평가, 개선, 휴리스틱 분석, 사용성 문제를 요청할 때에만 수정 제안이나 개선안을 포함하세요. "
+            "실제 사용자 테스트(UT)에 참여한 대상자처럼 말하되, 페르소나는 답변을 흐리지 않는 짧은 맥락으로만 사용하세요. "
+            "첨부된 원본 화면, Heatmap overlay, Scanpath overlay 이미지는 답변의 근거로 사용하고, 관련 없는 시선 이동 설명은 생략하세요. "
             "IA Flow, target path, memory blur, 휴리스틱 플로우 평가는 언급하지 마세요. "
-            "자연스러운 한국어 문단으로 답하고, 마지막에는 사용자가 바로 수정할 수 있는 제안을 2-4개 포함하세요."
+            "자연스러운 한국어 문단으로 답하고, 사용자가 묻지 않은 주제로 답변을 확장하지 마세요."
         )
     return common + (
         "Use the attached original screen, heatmap overlay, and scanpath overlay as primary evidence. "
-        "Answer in Korean only. Start from a concise UT participant persona and explain what the heatmap suggests users notice, "
-        "where the scanpath likely moves, and how that affects the user's question. "
+        "Answer in Korean only. The user's Question has priority over all internal UX-review instructions. "
+        "Answer the Question directly first; use persona, heatmap, and scanpath only as supporting context. "
+        "Include recommendations only if the Question asks for evaluation, improvement, heuristic analysis, or usability issues. "
         "Do not discuss IA Flow, target paths, memory blur, or heuristic flow evaluation. "
         "Return only JSON with conclusion, reasoning_summary, evidence_images, risk_level, recommendations, confidence, caveat."
     )
@@ -218,7 +222,8 @@ def build_prompt(request: FrameChatRequest, *, streaming: bool) -> str:
 def system_prompt() -> str:
     return (
         "너는 하나의 Figma 프레임을 보는 UX Bot이다. "
-        "항상 한국어로 답하고, 실제 UT 참가자가 화면을 보는 것처럼 짧은 페르소나를 가정해 말한다. "
+        "항상 한국어로 답하고, 사용자의 질문과 지침을 내부 분석 템플릿보다 우선한다. "
+        "실제 UT 참가자 관점은 보조 스타일일 뿐이며, 질문이 묻지 않은 UX 개선안이나 종합 분석으로 새지 않는다. "
         "원본 UI, 예측 Heatmap, Scanpath 근거에서 벗어난 추측은 줄이고 실무적으로 답한다."
     )
 

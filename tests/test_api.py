@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app, model_registry
+from app.models.frame import FrameChatRequest, FrameImageInput
+from app.services.vlm import build_prompt
 
 
 client = TestClient(app)
@@ -200,6 +202,30 @@ def test_frame_chat_stream_returns_progress_and_final(monkeypatch):
     assert "event: answer_delta" in response.text
     assert "event: final" in response.text
     assert "CTA 주변 시선 집중" in response.text
+
+
+def test_frame_chat_prompt_prioritizes_user_question():
+    artifact = FrameImageInput(
+        artifact_type="original",
+        mime_type="image/png",
+        base64=make_png_base64(),
+        width=80,
+        height=120,
+        image_role="original",
+    )
+    request = FrameChatRequest(
+        question="스타터는 어떤 의미일까?",
+        frame_id="local_1",
+        frame_name="마이페이지",
+        metrics={"fixation_count": 8},
+        selected_images=[artifact],
+        previous_messages=[],
+    )
+    prompt = build_prompt(request, streaming=True)
+    assert "Question에 직접 답" in prompt
+    assert "용어 의미" in prompt
+    assert "마지막에는 사용자가 바로 수정할 수 있는 제안" not in prompt
+    assert "사용자가 묻지 않은 주제" in prompt
 
 
 def test_legacy_single_analysis_still_works():
