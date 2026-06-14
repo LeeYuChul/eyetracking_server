@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     vlm_provider: str = "ollama"
     ollama_base_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "gemma4:26b"
-    ollama_keep_alive: str = "1m"
+    ollama_keep_alive: str = "0"
     ollama_num_ctx: int = 32768
     ollama_num_predict: int = 768
     vlm_request_timeout_seconds: float = 600.0

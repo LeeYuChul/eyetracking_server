@@ -148,46 +148,30 @@ def test_frames_analyze_rejects_metadata_file_mismatch():
 
 
 def test_frame_chat_stream_returns_progress_and_final(monkeypatch):
-    class FakeResponse:
-        status_code = 200
-        text = ""
+    async def fake_stream_events(request, settings):
+        assert len(request.selected_images) == 3
+        yield {"event": "progress", "data": {"stage": "started", "message": "시작", "progress": 0}}
+        yield {"event": "thinking_delta", "data": {"delta": "CTA 위치를 확인합니다.", "progress": 0.45}}
+        yield {"event": "answer_delta", "data": {"delta": "CTA 주변 시선 집중", "progress": 0.7}}
+        yield {
+            "event": "final",
+            "data": {
+                "answer": {
+                    "conclusion": "CTA 주변 시선 집중은 중간 수준입니다.",
+                    "reasoning_summary": ["Heatmap과 Scanpath 이미지를 확인했습니다."],
+                    "evidence_images": ["original", "heatmap_overlay", "scanpath_overlay"],
+                    "risk_level": "medium",
+                    "recommendations": ["CTA 주변 대비를 높이세요."],
+                    "confidence": "medium",
+                    "caveat": "predictive only",
+                },
+                "provider": "ollama",
+                "model": "gemma4:26b",
+                "progress": 1,
+            },
+        }
 
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "message": {
-                    "content": json.dumps(
-                        {
-                            "conclusion": "CTA 주변 시선 집중은 중간 수준입니다.",
-                            "reasoning_summary": ["Heatmap과 Scanpath 이미지를 확인했습니다."],
-                            "evidence_images": ["original", "heatmap_overlay", "scanpath_overlay"],
-                            "risk_level": "medium",
-                            "recommendations": ["CTA 주변 대비를 높이세요."],
-                            "confidence": "medium",
-                            "caveat": "predictive only",
-                        },
-                        ensure_ascii=False,
-                    )
-                }
-            }
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def post(self, url, json):
-            assert len(json["messages"][1]["images"]) == 3
-            return FakeResponse()
-
-    monkeypatch.setattr("app.services.vlm.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("app.main.stream_frame_chat_events", fake_stream_events)
     artifact = {
         "artifact_type": "original",
         "mime_type": "image/png",
@@ -212,7 +196,8 @@ def test_frame_chat_stream_returns_progress_and_final(monkeypatch):
     )
     assert response.status_code == 200
     assert "event: progress" in response.text
-    assert "event: thinking" in response.text
+    assert "event: thinking_delta" in response.text
+    assert "event: answer_delta" in response.text
     assert "event: final" in response.text
     assert "CTA 주변 시선 집중" in response.text
 
