@@ -1,6 +1,7 @@
 import io
 import json
 
+import app.main as main_module
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -52,6 +53,17 @@ def test_openapi_exposes_frame_chat_contract_without_flow_or_heuristic_chat():
     assert "/api/v1/ux/chat/heuristic" not in paths
     assert "/api/v1/ux/chat" not in paths
     assert "/api/v1/ux/evaluate" not in paths
+
+
+def test_rate_limit_rejects_after_minute_budget(monkeypatch):
+    monkeypatch.setattr(main_module, "rate_limiter", main_module.MinuteRateLimiter(2))
+    assert client.get("/api/v1/missing").status_code == 404
+    assert client.get("/api/v1/missing").status_code == 404
+    response = client.get("/api/v1/missing")
+    assert response.status_code == 429
+    assert response.json()["error_code"] == "RATE_LIMIT_EXCEEDED"
+    assert response.headers["Retry-After"] == "60"
+    assert client.get("/api/v1/health").status_code == 200
 
 
 def test_frames_analyze_returns_individual_frame_results():

@@ -1,15 +1,18 @@
 import json
 import logging
 import secrets
+from collections import deque
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
-from time import perf_counter
+from threading import Lock
+from time import monotonic, perf_counter
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.requests import Request
 from PIL import Image
 
 from app.core.config import Settings, get_settings
@@ -24,6 +27,28 @@ from app.services.vlm import evaluate_frame_chat, stream_frame_chat_events
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
+RATE_LIMIT_EXEMPT_PATHS = {"/api/v1/health", "/docs", "/openapi.json", "/redoc"}
+
+
+class MinuteRateLimiter:
+    def __init__(self, limit: int, window_seconds: float = 60.0) -> None:
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._timestamps: deque[float] = deque()
+        self._lock = Lock()
+
+    def allow(self) -> bool:
+        if self.limit <= 0:
+            return True
+        now = monotonic()
+        cutoff = now - self.window_seconds
+        with self._lock:
+            while self._timestamps and self._timestamps[0] <= cutoff:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self.limit:
+                return False
+            self._timestamps.append(now)
+            return True
 
 settings = get_settings()
 model_registry = ModelRegistry(
@@ -35,6 +60,7 @@ model_registry = ModelRegistry(
     default_model_name=settings.default_model_name,
     idle_unload_seconds=settings.model_idle_unload_seconds,
 )
+rate_limiter = MinuteRateLimiter(settings.rate_limit_per_minute)
 
 app = FastAPI(title=settings.service_name)
 app.add_middleware(
@@ -44,6 +70,19 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def rate_limit_requests(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path not in RATE_LIMIT_EXEMPT_PATHS and not rate_limiter.allow():
+        logger.info("request endpoint=%s frame_count=0 elapsed_ms=0.00 error_code=%s", path, ErrorCode.rate_limit_exceeded.value)
+        return JSONResponse(
+            status_code=429,
+            content={"error_code": ErrorCode.rate_limit_exceeded, "message": "Too many requests. Please try again later."},
+            headers={"Retry-After": "60"},
+        )
+    return await call_next(request)
 
 
 def get_model_registry() -> ModelRegistry:

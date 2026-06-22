@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     max_frames: int = 15
     max_upload_bytes: int = 10 * 1024 * 1024
     max_total_upload_bytes: int = 100 * 1024 * 1024
+    rate_limit_per_minute: int = 60
     model_idle_unload_seconds: float = 0.0
     overlay_alpha: float = Field(default=0.45, ge=0.0, le=1.0)
     vlm_provider: str = "ollama"
