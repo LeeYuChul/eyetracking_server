@@ -112,6 +112,35 @@ def test_frames_analyze_returns_individual_frame_results():
     assert frame["artifacts"]["scanpath_overlay"]["base64"]
 
 
+def test_frames_analyze_accepts_fractional_frame_dimensions():
+    response = client.post(
+        "/api/v1/frames/analyze",
+        files=[("files", ("frame_a", make_png(), "image/png"))],
+        data={
+            "model_name": "heuristic",
+            "frames_meta": json.dumps(
+                [
+                    {
+                        "client_frame_id": "local_1",
+                        "figma_node_id": "1:1",
+                        "frame_name": "Fractional",
+                        "width": 80.7,
+                        "height": 120.2,
+                        "file_key": "frame_a",
+                        "order_index": 0,
+                    }
+                ]
+            ),
+        },
+    )
+    assert response.status_code == 200
+    frame = response.json()["frames"][0]
+    assert frame["width"] == 81
+    assert frame["height"] == 120
+    assert frame["artifacts"]["original"]["width"] == 81
+    assert frame["artifacts"]["original"]["height"] == 120
+
+
 def test_frames_analyze_rejects_too_many_frames():
     response = client.post(
         "/api/v1/frames/analyze",
@@ -244,8 +273,10 @@ def test_legacy_single_analysis_still_works():
     response = client.post(
         "/api/v1/analyses",
         files={"file": ("frame.png", make_png(), "image/png")},
-        data={"frame_id": "1:2", "frame_name": "Home", "width": "80", "height": "120", "model_name": "heuristic"},
+        data={"frame_id": "1:2", "frame_name": "Home", "width": "80.7", "height": "120.2", "model_name": "heuristic"},
     )
     assert response.status_code == 200
     assert response.json()["report"]["model"]["name"] == "Heuristic"
+    assert response.json()["request"]["width"] == 81
+    assert response.json()["request"]["height"] == 120
     assert model_registry.get("heuristic").loaded is False

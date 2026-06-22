@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import secrets
 from collections import deque
 from datetime import UTC, datetime
@@ -105,13 +106,13 @@ def error_response(status_code: int, code: ErrorCode, message: str) -> JSONRespo
     return JSONResponse(status_code=status_code, content={"error_code": code, "message": message})
 
 
-def parse_positive_int(value: float, field_name: str) -> int:
-    if value <= 0 or int(value) != value:
+def parse_positive_dimension(value: float, field_name: str) -> int:
+    if not math.isfinite(value) or value <= 0:
         raise HTTPException(
             status_code=400,
-            detail={"error_code": ErrorCode.invalid_frame_metadata, "message": f"{field_name} must be a positive integer"},
+            detail={"error_code": ErrorCode.invalid_frame_metadata, "message": f"{field_name} must be a positive number"},
         )
-    return int(value)
+    return max(1, math.floor(value + 0.5))
 
 
 def log_request(endpoint: str, started_at: float, *, frame_count: int = 0, error_code: ErrorCode | None = None) -> None:
@@ -240,8 +241,8 @@ async def analyze_frames(
                 return error_response(400, ErrorCode.invalid_frame_metadata, "client_frame_id and frame_name are required")
             if frame.width is None or frame.height is None:
                 return error_response(400, ErrorCode.invalid_frame_metadata, "width and height are required")
-            width = parse_positive_int(float(frame.width), "width")
-            height = parse_positive_int(float(frame.height), "height")
+            width = parse_positive_dimension(float(frame.width), "width")
+            height = parse_positive_dimension(float(frame.height), "height")
             file_key = frame.file_key or frame.client_frame_id
             upload = uploads_by_key.get(file_key) or uploads_by_filename.get(file_key)
             if upload is None:
@@ -403,8 +404,8 @@ async def create_analysis(
     if not frame_id.strip() or not frame_name.strip():
         return error_response(400, ErrorCode.invalid_frame_metadata, "frame_id and frame_name are required")
 
-    parsed_width = parse_positive_int(width, "width")
-    parsed_height = parse_positive_int(height, "height")
+    parsed_width = parse_positive_dimension(width, "width")
+    parsed_height = parse_positive_dimension(height, "height")
     parsed_options = {}
     if options:
         try:
