@@ -164,8 +164,8 @@ def test_frames_analyze_rejects_metadata_file_mismatch():
 def test_frame_chat_stream_returns_progress_and_final(monkeypatch):
     async def fake_stream_events(request, settings):
         assert len(request.selected_images) == 3
-        yield {"event": "progress", "data": {"stage": "started", "message": "시작", "progress": 0}}
-        yield {"event": "thinking_delta", "data": {"delta": "CTA 위치를 확인합니다.", "progress": 0.45}}
+        yield {"event": "progress", "data": {"stage": "started", "message": "Started", "progress": 0}}
+        yield {"event": "thinking_delta", "data": {"delta": "Checking the CTA position.", "progress": 0.45}}
         yield {"event": "answer_delta", "data": {"delta": "CTA 주변 시선 집중", "progress": 0.7}}
         yield {
             "event": "final",
@@ -234,10 +234,10 @@ def test_frame_chat_prompt_prioritizes_user_question():
         previous_messages=[],
     )
     prompt = build_prompt(request, streaming=True)
-    assert "Question에 직접 답" in prompt
-    assert "용어 의미" in prompt
-    assert "마지막에는 사용자가 바로 수정할 수 있는 제안" not in prompt
-    assert "사용자가 묻지 않은 주제" in prompt
+    assert "same language as the user's Question" in prompt
+    assert "answer the user's Question directly" in prompt
+    assert "meaning of a visible term" in prompt
+    assert "Do not expand into topics the user did not ask about" in prompt
 
 
 def test_legacy_single_analysis_still_works():

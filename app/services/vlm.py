@@ -11,7 +11,7 @@ from app.core.config import Settings
 from app.models.frame import FrameChatAnswer, FrameChatRequest, FrameChatResponse
 from app.services.artifacts import artifact_to_data_url, image_from_artifact, image_to_base64
 
-CHAT_CAVEAT = "이 답변은 아이트래킹 예측 모델의 heatmap/scanpath 결과 기반 참고이며 실제 사용자 테스트를 대체하지 않습니다."
+CHAT_CAVEAT = "This answer is based on predictive eye-tracking heatmap/scanpath evidence and does not replace real usability testing."
 MAX_FRAME_CHAT_IMAGES = 3
 
 
@@ -43,7 +43,7 @@ async def stream_frame_chat_events(request: FrameChatRequest, settings: Settings
         "progress",
         {
             "stage": "started",
-            "message": "선택한 프레임의 원본, Heatmap, Scanpath 이미지를 확인합니다.",
+            "message": "Reviewing the selected frame, heatmap, and scanpath evidence.",
             "progress": 0,
         },
     )
@@ -52,7 +52,7 @@ async def stream_frame_chat_events(request: FrameChatRequest, settings: Settings
             "progress",
             {
                 "stage": "image_evidence",
-                "message": "VLM에 원본/Heatmap/Scanpath 근거 이미지를 전달했습니다.",
+                "message": "Sending the original frame, heatmap overlay, and scanpath overlay to the VLM.",
                 "evidence_images": image_roles(request),
                 "progress": 0.25,
             },
@@ -71,7 +71,7 @@ async def stream_frame_chat_events(request: FrameChatRequest, settings: Settings
             yield item
         answer = answer_from_stream_text("".join(answer_parts), "".join(thinking_parts), request)
 
-    yield stream_event("progress", {"stage": "synthesizing", "message": "시선 지표와 이미지 근거를 종합 중입니다.", "progress": 0.85})
+    yield stream_event("progress", {"stage": "synthesizing", "message": "Synthesizing the visual evidence and attention metrics.", "progress": 0.85})
     yield stream_event(
         "final",
         {
@@ -199,19 +199,20 @@ def build_prompt(request: FrameChatRequest, *, streaming: bool) -> str:
     )
     if streaming:
         return common + (
-            "반드시 한국어로만 답하세요. 가장 중요한 규칙은 Question에 직접 답하는 것입니다. "
-            "내부 UX 분석 지침, 페르소나, Heatmap, Scanpath 설명은 Question에 답하는 데 필요한 경우에만 보조 근거로 사용하세요. "
-            "Question이 화면 문구의 의미, 특정 용어, 버튼, 위치, 상태에 대한 질문이면 먼저 그 질문의 답을 1-2문장으로 명확히 말하세요. "
-            "예를 들어 '스타터는 어떤 의미일까?'처럼 용어 의미를 묻는다면, UX 개선안보다 해당 단어가 이 화면에서 어떤 상태/역할을 뜻하는지 먼저 설명하세요. "
-            "Question이 명시적으로 평가, 개선, 휴리스틱 분석, 사용성 문제를 요청할 때에만 수정 제안이나 개선안을 포함하세요. "
-            "실제 사용자 테스트(UT)에 참여한 대상자처럼 말하되, 페르소나는 답변을 흐리지 않는 짧은 맥락으로만 사용하세요. "
-            "첨부된 원본 화면, Heatmap overlay, Scanpath overlay 이미지는 답변의 근거로 사용하고, 관련 없는 시선 이동 설명은 생략하세요. "
-            "IA Flow, target path, memory blur, 휴리스틱 플로우 평가는 언급하지 마세요. "
-            "자연스러운 한국어 문단으로 답하고, 사용자가 묻지 않은 주제로 답변을 확장하지 마세요."
+            "Answer in the same language as the user's Question. If the Question mixes languages, use the dominant language of the Question. "
+            "The most important rule is to answer the user's Question directly. "
+            "Internal UX-review guidance, persona framing, heatmap evidence, and scanpath evidence are secondary and should only support the answer. "
+            "If the Question asks about the meaning of a visible term, button, location, or state, answer that meaning clearly in the first 1-2 sentences. "
+            "For example, if the user asks what a label means, explain the label's likely role/status on this screen before giving any UX critique. "
+            "Include recommendations only when the Question explicitly asks for evaluation, improvement, heuristic analysis, or usability issues. "
+            "You may speak from a lightweight usability-test participant perspective, but keep that persona brief and never let it override the Question. "
+            "Use the attached original frame, heatmap overlay, and scanpath overlay as evidence, and skip unrelated eye-movement details. "
+            "Do not discuss IA Flow, target paths, memory blur, or heuristic flow evaluation. "
+            "Do not expand into topics the user did not ask about."
         )
     return common + (
         "Use the attached original screen, heatmap overlay, and scanpath overlay as primary evidence. "
-        "Answer in Korean only. The user's Question has priority over all internal UX-review instructions. "
+        "Answer in the same language as the user's Question. The user's Question has priority over all internal UX-review instructions. "
         "Answer the Question directly first; use persona, heatmap, and scanpath only as supporting context. "
         "Include recommendations only if the Question asks for evaluation, improvement, heuristic analysis, or usability issues. "
         "Do not discuss IA Flow, target paths, memory blur, or heuristic flow evaluation. "
@@ -221,10 +222,11 @@ def build_prompt(request: FrameChatRequest, *, streaming: bool) -> str:
 
 def system_prompt() -> str:
     return (
-        "너는 하나의 Figma 프레임을 보는 UX Bot이다. "
-        "항상 한국어로 답하고, 사용자의 질문과 지침을 내부 분석 템플릿보다 우선한다. "
-        "실제 UT 참가자 관점은 보조 스타일일 뿐이며, 질문이 묻지 않은 UX 개선안이나 종합 분석으로 새지 않는다. "
-        "원본 UI, 예측 Heatmap, Scanpath 근거에서 벗어난 추측은 줄이고 실무적으로 답한다."
+        "You are UX Bot reviewing one Figma frame at a time. "
+        "Always prioritize the user's question and instructions over internal analysis templates. "
+        "Answer in the same language as the user's question. "
+        "The usability-test participant perspective is only a light supporting style; do not drift into unsolicited UX critique. "
+        "Stay grounded in the original UI, predicted heatmap, and scanpath evidence."
     )
 
 
@@ -266,7 +268,7 @@ def parse_answer(content: str) -> FrameChatAnswer:
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
-        data = {"conclusion": content.strip() or "답변을 생성하지 못했습니다."}
+        data = {"conclusion": content.strip() or "Could not generate an answer."}
     if not isinstance(data, dict):
         data = {"conclusion": str(data)}
 
@@ -274,27 +276,27 @@ def parse_answer(content: str) -> FrameChatAnswer:
     recommendations = data.get("recommendations")
     evidence_images = data.get("evidence_images")
     return FrameChatAnswer(
-        conclusion=str(data.get("conclusion", "제공된 이미지 근거만으로는 결론이 제한적입니다.")),
-        reasoning_summary=[str(item) for item in reasoning] if isinstance(reasoning, list) and reasoning else ["원본, Heatmap, Scanpath 이미지를 함께 확인했습니다."],
+        conclusion=str(data.get("conclusion", "The conclusion is limited by the provided image evidence.")),
+        reasoning_summary=[str(item) for item in reasoning] if isinstance(reasoning, list) and reasoning else ["Reviewed the original frame, heatmap overlay, and scanpath overlay together."],
         evidence_images=[str(item) for item in evidence_images] if isinstance(evidence_images, list) else ["original", "heatmap_overlay", "scanpath_overlay"],
         risk_level=data.get("risk_level") if data.get("risk_level") in {"low", "medium", "high"} else "medium",
-        recommendations=[str(item) for item in recommendations] if isinstance(recommendations, list) and recommendations else ["중요 CTA 주변의 시각적 경쟁 요소를 줄이는 방안을 검토하세요."],
+        recommendations=[str(item) for item in recommendations] if isinstance(recommendations, list) and recommendations else ["Review visual competition around important calls to action."],
         confidence=data.get("confidence") if data.get("confidence") in {"low", "medium", "high"} else "medium",
         caveat=str(data.get("caveat") or CHAT_CAVEAT),
     )
 
 
 def answer_from_stream_text(answer_text: str, thinking_text: str, request: FrameChatRequest) -> FrameChatAnswer:
-    conclusion = answer_text.strip() or "제공된 이미지 근거만으로는 답변을 생성하지 못했습니다."
-    reasoning = ["원본 화면, Heatmap overlay, Scanpath overlay 이미지를 함께 확인했습니다."]
+    conclusion = answer_text.strip() or "I could not generate an answer from the provided image evidence."
+    reasoning = ["Reviewed the original frame, heatmap overlay, and scanpath overlay together."]
     if thinking_text:
-        reasoning.append("모델의 중간 추론 신호를 스트리밍으로 수신했습니다.")
+        reasoning.append("Received intermediate model reasoning signals through the stream.")
     return FrameChatAnswer(
         conclusion=conclusion,
         reasoning_summary=reasoning,
         evidence_images=[item["image_role"] for item in image_roles(request)],
         risk_level="medium",
-        recommendations=["Heatmap 집중 구역과 Scanpath가 지나치게 길어지는 구역을 우선 조정하세요."],
+        recommendations=["Review areas with strong heatmap concentration and unusually long scanpath transitions first."],
         confidence="medium",
         caveat=CHAT_CAVEAT,
     )

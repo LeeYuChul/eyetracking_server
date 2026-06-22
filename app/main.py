@@ -346,7 +346,7 @@ async def frame_chat_stream(
             return
         if settings.vlm_provider.strip().lower() != "ollama":
             try:
-                yield sse_message("progress", {"stage": "evaluating", "message": "프레임 이미지를 VLM으로 평가 중입니다.", "progress": 0.1})
+                yield sse_message("progress", {"stage": "evaluating", "message": "Evaluating the selected frame with the VLM.", "progress": 0.1})
                 response = await evaluate_frame_chat(request, settings)
                 yield sse_message(
                     "final",
